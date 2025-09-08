@@ -1,5 +1,4 @@
 import json
-import numpy as np
 import os
 import random
 
@@ -7,7 +6,6 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms as transforms
-from utils import cal_ground_normal, rectify_c2w
 
 
 def resize_and_crop(image, target_size, fxfycxcy):
@@ -94,16 +92,12 @@ class NVSDataset(Dataset):
         data_path, num_views, image_size, 
         sorted_indices=False, 
         scene_pose_normalize=False,
-        best_path=None,
     ):
         """
         image_size is (h, w) or just a int (as size).
         """
         self.base_dir = os.path.dirname(data_path)
         self.data_point_paths = json.load(open(data_path, "r"))
-        self.best_data_point_paths = None
-        if best_path is not None:
-            self.best_data_point_paths = json.load(open(best_path, "r"))
         self.sorted_indices = sorted_indices
         self.scene_pose_normalize = scene_pose_normalize
 
@@ -119,56 +113,14 @@ class NVSDataset(Dataset):
     def __getitem__(self, index):
         data_point_path = os.path.join(self.base_dir, self.data_point_paths[index])
         data_point_base_dir = os.path.dirname(data_point_path)
-        scene_id = os.path.basename(os.path.dirname(data_point_path))
         with open(data_point_path, "r") as f:
             images_info = json.load(f)
         
-        ############################################################
-        # 1. 对所有图像的c2ws进行normalize_with_mean_pose
-        c2w_all = []
-        for info in images_info:
-            w2c = torch.tensor(info["w2c"])
-            c2w = torch.inverse(w2c)
-            c2w_all.append(c2w)
-        c2ws = torch.stack(c2w_all)
-        if self.scene_pose_normalize:
-            print("Normalizing scene poses...")
-            c2ws = normalize_with_mean_pose(c2ws)
-        for idx, c2w in enumerate(c2ws):
-            images_info[idx]["c2w"] = c2w
-
-        ############################################################
-        # 2. 找到与地面垂直的normal
-        vectors = []
-        for idx, c2w in enumerate(c2ws):
-            vectors.append(c2w[:3, 3].numpy())
-        normal, r2, rmse = cal_ground_normal(np.array(vectors))
-        normal = torch.tensor(normal)
-        print("The R^2 of the ground normal fitting:", r2)
-
-        ############################################################
-        # 3. 对全部图像的c2ws进行rectify, 摆正相机方向
-        for info in images_info:
-            info["c2w_rectify"] = rectify_c2w(info["c2w"], normal)
-
-        ############################################################
-        # 4. 采样出训练图像 + best图像
         # If the num_views is larger than the number of images, use all images
         indices = random.sample(range(len(images_info)), min(self.num_views, len(images_info)))
         if self.sorted_indices:
             indices = sorted(indices)
-
-        best_index_list = []
-        if self.best_data_point_paths is not None:
-            best_data_point_path = os.path.join(self.base_dir, self.best_data_point_paths[index])
-            with open(best_data_point_path, "r") as f:
-                best_list = json.load(f)
-            for index, info in enumerate(images_info):
-                if info["file_path"] in best_list:
-                    best_index_list.append(index)
-        num_best = len(best_index_list)
-        indices = indices + best_index_list
-
+        
         fxfycxcy_list = []
         c2w_list = []
         image_list = []
@@ -177,7 +129,11 @@ class NVSDataset(Dataset):
             info = images_info[index]
             
             fxfycxcy = [info["fx"], info["fy"], info["cx"], info["cy"]]
-
+            
+            w2c = torch.tensor(info["w2c"])
+            c2w = torch.inverse(w2c)
+            c2w_list.append(c2w)
+            
             # Load image from file_path using PIL and convert to torch tensor
             image_path = os.path.join(data_point_base_dir, info["file_path"])
             image = Image.open(image_path)
@@ -194,23 +150,16 @@ class NVSDataset(Dataset):
                 # Convert any other mode to RGB
                 image = image.convert('RGB')
             
-            c2w_list.append(info["c2w"])
             fxfycxcy_list.append(fxfycxcy)
             image_list.append(transforms.ToTensor()(image))
-
-        c2w_best_rectify_list = []
-        for index in best_index_list:
-            info = images_info[index]
-            c2w_best_rectify_list.append(info["c2w_rectify"])
+        
+        c2ws = torch.stack(c2w_list)
+        if self.scene_pose_normalize:
+            print("Normalizing scene poses...")
+            c2ws = normalize_with_mean_pose(c2ws)
 
         return {
-            "scene_id": scene_id,
-            "fxfycxcy": torch.tensor(fxfycxcy_list[:-num_best]),
-            "c2w": torch.stack(c2w_list[:-num_best]),
-            "image": torch.stack(image_list[:-num_best]),
-            "fxfycxcy_best": torch.tensor(fxfycxcy_list)[-num_best:],
-            "c2w_best_raw": torch.stack(c2w_list)[-num_best:],
-            "image_best_raw": torch.stack(image_list)[-num_best:],
-            "c2w_best_rectify": torch.stack(c2w_best_rectify_list),
-            "name_best": best_list,
+            "fxfycxcy": torch.tensor(fxfycxcy_list),
+            "c2w": c2ws,
+            "image": torch.stack(image_list),
         }

@@ -12,12 +12,11 @@ It follows the processing rules from process_dl3dv.py:
 6. Creates a dl3dv_sample_data_path.json file
 """
 
-import os
 import json
-import shutil
 from pathlib import Path
 import numpy as np
 import cv2
+from PIL import Image
 
 
 def process_one_scene(scene_path, output_dir=None):
@@ -44,9 +43,9 @@ def process_one_scene(scene_path, output_dir=None):
     scene_name = scene_path.name
     
     # Read transforms.json
-    json_file = scene_path / 'nerfstudio' / 'transforms.json'
+    json_file = scene_path / 'transforms.json'
     if not json_file.exists():
-        print(f"Warning: transforms.json not found in {scene_path / 'nerfstudio'}")
+        print(f"Warning: transforms.json not found in {scene_path}")
         return False
     
     json_data = json.load(open(json_file, 'r'))
@@ -73,6 +72,12 @@ def process_one_scene(scene_path, output_dir=None):
 
     # Create undistort folder
     undistort_dir = output_dir / 'images_undistort'
+    if undistort_dir.exists():
+        undistort_images = list(undistort_dir.glob('*.jpg'))
+        if len(undistort_images) == num_frames:
+            print(f"Skipping undistort folder: {scene_path}, num_frames: {num_frames}")
+            return True
+
     undistort_dir.mkdir(parents=True, exist_ok=True)
 
     for i in range(num_frames):
@@ -80,7 +85,7 @@ def process_one_scene(scene_path, output_dir=None):
         file_path = 'images_4/' + frame['file_path'].split('/')[-1]
 
         # Load and undistort image
-        image_path = scene_path / 'nerfstudio' / file_path
+        image_path = scene_path / file_path
         if not image_path.exists():
             print(f"Warning: Image not found: {image_path}")
             continue
@@ -102,8 +107,10 @@ def process_one_scene(scene_path, output_dir=None):
         fx, fy, cx, cy = new_intr[0, 0], new_intr[1, 1], new_intr[0, 2], new_intr[1, 2]
 
         # Save undistorted image
-        output_image_path = undistort_dir / frame['file_path'].split('/')[-1]
-        cv2.imwrite(str(output_image_path), image)
+        output_image_path = undistort_dir / frame['file_path'].split('/')[-1].replace('.png', '.jpg')
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(image).convert('RGB')
+        image.save(str(output_image_path), quality=95, optimize=True)
 
         # Transform camera pose (following process_dl3dv.py rules)
         c2w = np.asarray(frame["transform_matrix"])
@@ -113,7 +120,7 @@ def process_one_scene(scene_path, output_dir=None):
         w2c = np.linalg.inv(c2w)
         
         # Create frame data with reordered fields to match GSO format
-        file_path = 'images_undistort/' + frame['file_path'].split('/')[-1]
+        file_path = 'images_undistort/' + frame['file_path'].split('/')[-1].replace('.png', '.jpg')
         frame_new = {
             "w": w, "h": h,  # Reordered to match GSO format
             "fx": fx, "fy": fy, 
@@ -138,28 +145,10 @@ def convert_folder(folder_path, output_dir=None):
         output_dir: Optional output directory (if None, uses folder_path)
     """
     folder_path = Path(folder_path)
-    nerfstudio_path = folder_path / 'nerfstudio'
-    
-    if not nerfstudio_path.exists():
-        print(f"Warning: nerfstudio folder not found in {folder_path}")
-        return False
-    
+       
     # Process the scene following process_dl3dv.py rules
     success = process_one_scene(folder_path, output_dir)
-    
-    if success and output_dir is None:
-        # If processing in-place, also move images_4 to images
-        images_4_path = nerfstudio_path / 'images_4'
-        images_path = folder_path / 'images'
         
-        if images_4_path.exists():
-            if images_path.exists():
-                shutil.rmtree(images_path)
-            shutil.move(str(images_4_path), str(images_path))
-        
-        # Remove nerfstudio folder
-        shutil.rmtree(nerfstudio_path)
-    
     return success
 
 
