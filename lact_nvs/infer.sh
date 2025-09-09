@@ -11,4 +11,5 @@ python inference.py \
 --max_yaw_deg 10 \
 --max_pitch_deg 10 \
 --num_yaw 5 \
---num_pitch 5
+--num_pitch 5 \
+--max_rectify_deg 10

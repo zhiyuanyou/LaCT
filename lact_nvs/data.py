@@ -95,6 +95,7 @@ class NVSDataset(Dataset):
         sorted_indices=False, 
         scene_pose_normalize=False,
         best_path=None,
+        max_rectify_deg=None,
     ):
         """
         image_size is (h, w) or just a int (as size).
@@ -104,6 +105,7 @@ class NVSDataset(Dataset):
         self.best_data_point_paths = None
         if best_path is not None:
             self.best_data_point_paths = json.load(open(best_path, "r"))
+        self.max_rectify_deg = max_rectify_deg
         self.sorted_indices = sorted_indices
         self.scene_pose_normalize = scene_pose_normalize
 
@@ -123,6 +125,8 @@ class NVSDataset(Dataset):
         with open(data_point_path, "r") as f:
             images_info = json.load(f)
         
+        print("=" * 100)
+        print("Processing scene:", scene_id)
         ############################################################
         # 1. 对所有图像的c2ws进行normalize_with_mean_pose
         c2w_all = []
@@ -142,17 +146,12 @@ class NVSDataset(Dataset):
         vectors = []
         for idx, c2w in enumerate(c2ws):
             vectors.append(c2w[:3, 3].numpy())
-        normal, r2, rmse = cal_ground_normal(np.array(vectors))
+        normal, r2, _, line_like, lambdas = cal_ground_normal(np.array(vectors))
         normal = torch.tensor(normal)
-        print("The R^2 of the ground normal fitting:", r2)
+        print("The R^2 of the ground normal fitting:", r2, "lambdas:", lambdas, "line_like:", line_like)
 
         ############################################################
-        # 3. 对全部图像的c2ws进行rectify, 摆正相机方向
-        for info in images_info:
-            info["c2w_rectify"] = rectify_c2w(info["c2w"], normal)
-
-        ############################################################
-        # 4. 采样出训练图像 + best图像
+        # 3. 采样出训练图像 + best图像
         # If the num_views is larger than the number of images, use all images
         indices = random.sample(range(len(images_info)), min(self.num_views, len(images_info)))
         if self.sorted_indices:
@@ -198,10 +197,19 @@ class NVSDataset(Dataset):
             fxfycxcy_list.append(fxfycxcy)
             image_list.append(transforms.ToTensor()(image))
 
+        ############################################################
+        # 4. 对best图像进行rectify
         c2w_best_rectify_list = []
+        deg_best_rectify_list = []
         for index in best_index_list:
             info = images_info[index]
-            c2w_best_rectify_list.append(info["c2w_rectify"])
+            if line_like:
+                c2w_rectify = info["c2w"]
+                rectify_deg = 0
+            else:
+                c2w_rectify, rectify_deg = rectify_c2w(info["c2w"], normal, self.max_rectify_deg)
+            c2w_best_rectify_list.append(c2w_rectify)
+            deg_best_rectify_list.append(rectify_deg)
 
         return {
             "scene_id": scene_id,
@@ -212,5 +220,6 @@ class NVSDataset(Dataset):
             "c2w_best_raw": torch.stack(c2w_list)[-num_best:],
             "image_best_raw": torch.stack(image_list)[-num_best:],
             "c2w_best_rectify": torch.stack(c2w_best_rectify_list),
+            "deg_best_rectify": torch.tensor(deg_best_rectify_list),
             "name_best": best_list,
         }

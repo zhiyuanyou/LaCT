@@ -138,6 +138,7 @@ parser.add_argument("--max_yaw_deg", type=int, default=10)
 parser.add_argument("--max_pitch_deg", type=int, default=10)
 parser.add_argument("--num_yaw", type=int, default=5)
 parser.add_argument("--num_pitch", type=int, default=5)
+parser.add_argument("--max_rectify_deg", type=float, default=None)
 
 args = parser.parse_args()
 model_config = omegaconf.OmegaConf.load(args.config)
@@ -168,6 +169,7 @@ dataset = NVSDataset(
     sorted_indices=args.scene_inference, 
     scene_pose_normalize=args.scene_inference,
     best_path=args.best_path,
+    max_rectify_deg=args.max_rectify_deg,
 )
 dataloader_seed_generator = torch.Generator()
 dataloader_seed_generator.manual_seed(seed)
@@ -183,17 +185,18 @@ for sample_idx, data_dict in enumerate(dataloader):
     scene_id = data_dict["scene_id"][0]  # batch size == 1
     name_best = [_[0] for _ in data_dict["name_best"]]  # batch size == 1
     image_best_raw = data_dict.pop("image_best_raw").cuda()
-    fxfycxcy_best = data_dict.pop("fxfycxcy_best")
-    c2w_best_raw = data_dict.pop("c2w_best_raw")
-    c2w_best_rectify = data_dict.pop("c2w_best_rectify")
+    fxfycxcy_best = data_dict.pop("fxfycxcy_best")  # [1, N, 4]
+    c2w_best_raw = data_dict.pop("c2w_best_raw")  # [1, N, 4, 4]
+    c2w_best_rectify = data_dict.pop("c2w_best_rectify")  # [1, N, 4, 4]
+    deg_best_rectify = data_dict.pop("deg_best_rectify")  # [1, N]
     assert c2w_best_raw.shape == c2w_best_rectify.shape
     num_best_raw = c2w_best_raw.shape[1]
     num_best_rectify = c2w_best_rectify.shape[1]
-    assert num_best_raw == len(name_best), f"{num_best_raw} != {len(name_best)}"
+    assert num_best_raw == len(name_best) == deg_best_rectify.shape[1]
     
     for idx_best in range(num_best_raw):
         name_best_one = os.path.splitext(os.path.basename(name_best[idx_best]))[0]
-        save_dir = os.path.join(output_dir, scene_id, f"best{idx_best:02d}_{name_best_one}")
+        save_dir = os.path.join(output_dir, scene_id, name_best_one)
         if os.path.exists(save_dir):
             image_list = [_ for _ in os.listdir(save_dir) if _.endswith(".jpg")]
             # +3: raw, raw_target, rectify; -1: maybe not save yaw=0 & pitch=0
@@ -207,6 +210,7 @@ for sample_idx, data_dict in enumerate(dataloader):
         fxfycxcy_best_one = fxfycxcy_best[:, idx_best].squeeze(0)  # [4,]
         c2w_best_raw_one = c2w_best_raw[:, idx_best].squeeze(0)  # [4, 4]
         c2w_best_rectify_one = c2w_best_rectify[:, idx_best].squeeze(0)  # [4, 4]
+        deg_best_rectify_one = deg_best_rectify[:, idx_best].squeeze(0).item()  # [1,]
 
         c2w_nearbest_rectify = []
         fxfycxcy_nearbest = []
@@ -262,7 +266,7 @@ for sample_idx, data_dict in enumerate(dataloader):
                     save_image_rgb(rendering[batch_idx, 0], os.path.join(save_dir, "raw_render.jpg"))
                     save_image_rgb(target[batch_idx, 0], os.path.join(save_dir, "raw_target.jpg"))
                     # Save rectify
-                    save_image_rgb(rendering[batch_idx, 1], os.path.join(save_dir, "rectify_render.jpg"))
+                    save_image_rgb(rendering[batch_idx, 1], os.path.join(save_dir, f"rectify_deg{deg_best_rectify_one:.2f}.jpg"))
                     # Save shift
                     num_render = rendering.shape[1]
                     assert num_render == num_nearbest + 2  # +2: raw, rectify

@@ -3,13 +3,13 @@ import torch
 from sklearn.decomposition import PCA
 
 
-def cal_ground_normal(points):
+def cal_ground_normal(points, line_like_threshold=0.1):
     points = np.array(points)
     points_centered = points - points.mean(axis=0)
     points_centered = np.array(points_centered)
     # PCA 分解
     pca = PCA(n_components=3)
-    pca.fit(points)
+    pca.fit(points_centered)
     # 最小特征值对应的分量方向
     normal = pca.components_[-1]
     normal = normal / np.linalg.norm(normal)
@@ -17,13 +17,15 @@ def cal_ground_normal(points):
     lambdas = pca.explained_variance_
     variance_ratio = lambdas[-1] / sum(lambdas)
     r2 = 1 - variance_ratio
+    # 检查是否退化成近似直线
+    line_like = (lambdas[1] + lambdas[2]) / lambdas[0] < line_like_threshold
     # 点到平面距离的 RMSE
     dists = np.dot(points_centered, normal)
     rmse = np.sqrt(np.mean(dists**2))
-    return normal, r2, rmse
+    return normal, r2, rmse, line_like, lambdas
 
 
-def rectify_c2w(c2w: torch.Tensor, world_up: torch.Tensor) -> torch.Tensor:
+def rectify_c2w(c2w: torch.Tensor, world_up: torch.Tensor, max_rectify_deg: float) -> torch.Tensor:
     """
     c2w: [4, 4] camera-to-world
     world_up: [3] 平面法向量
@@ -63,13 +65,19 @@ def rectify_c2w(c2w: torch.Tensor, world_up: torch.Tensor) -> torch.Tensor:
         u_new = normalize(torch.cross(f, r_new, dim=-1))
         f_new = f  # f 保持不变
 
-    R_new = torch.stack([r_new, u_new, f_new], dim=-1)
+    # === 判断角度差异，若变化过大则返回原始姿态 ===
+    cos_theta = (u * u_new).sum() if is_landscape else (r * r_new).sum()
+    cos_theta = cos_theta.clamp(-1.0, 1.0)
+    rectify_deg = torch.rad2deg(torch.acos(cos_theta))
+    if rectify_deg > max_rectify_deg:
+        return c2w, 0  # 差异过大，放弃矫正
 
-    out = c2w.clone()
-    out[:3, :3] = R_new
-    out[:3, 3]  = t
-    out[3, :]   = torch.tensor([0, 0, 0, 1], dtype=out.dtype, device=out.device)
-    return out
+    R_new = torch.stack([r_new, u_new, f_new], dim=-1)
+    c2w_rectify = c2w.clone()
+    c2w_rectify[:3, :3] = R_new
+    c2w_rectify[:3, 3]  = t
+    c2w_rectify[3, :]   = torch.tensor([0, 0, 0, 1], dtype=c2w_rectify.dtype, device=c2w_rectify.device)
+    return c2w_rectify, rectify_deg
 
 
 def Rx(theta): c,s=np.cos(theta),np.sin(theta); return np.array([[1,0,0],[0,c,-s],[0,s,c]])
